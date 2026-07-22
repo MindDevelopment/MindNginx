@@ -752,7 +752,7 @@ function renderMainDashboard(sites, nginxStatus, nginxVersion, updateInfo = null
 
     // Footer
     out.push(sepFull(INNER, bc));
-    const copyrightText = `© 2026 MindDevelopment`;
+    const copyrightText = `© 2026 MindDevelopment - MindNginx`;
 
     if (updateInfo && updateInfo.isOutdated) {
         const versionText = `Version: ${updateInfo.currentVersion}`;
