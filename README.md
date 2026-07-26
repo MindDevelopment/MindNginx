@@ -1,4 +1,4 @@
-# MindNginx
+# MindNginx Linux SCRIPT
 
 <p align="center">
   <strong>Terminal-based Nginx Configuration Manager</strong>
