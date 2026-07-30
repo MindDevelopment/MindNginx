@@ -264,6 +264,19 @@ async function nginxTest() {
     }
 }
 
+async function runCertbot(domain) {
+    return new Promise((resolve, reject) => {
+        const cmd = `sudo certbot --nginx -d ${domain} --non-interactive --agree-tos --register-unsafely-without-email --redirect`;
+        exec(cmd, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+            if (err) {
+                reject(new Error(stderr || err.message));
+            } else {
+                resolve({ stdout: (stdout || '').trim(), stderr: (stderr || '').trim() });
+            }
+        });
+    });
+}
+
 async function getNginxStatus() {
     return new Promise((resolve) => {
         exec('systemctl is-active nginx 2>/dev/null || pgrep nginx > /dev/null && echo "active" || echo "inactive"', (err, stdout) => {
@@ -839,16 +852,17 @@ async function mainMenu() {
 async function addSite() {
     await showDashboard([
         `${C.bold}Step 1:${C.reset} Site details`,
-        `${C.dim}Create a new Nginx server block configuration.${C.reset}`,
+        `${C.dim}Enter a subdomain (e.g. test) — it will be automatically expanded to test.minddev.nl${C.reset}`,
         '',
     ], { title: 'Add site', titleColor: THEME.info });
 
-    const serverName = (await ask(`  ${THEME.info}Domain name (e.g. example.com):${C.reset} `)).trim();
-    if (!serverName) {
-        await showDashboard([error('Domain name is required.')], { title: 'Add site' });
+    const subdomain = (await ask(`  ${THEME.info}Subdomain (e.g. test):${C.reset} `)).trim();
+    if (!subdomain) {
+        await showDashboard([error('Subdomain is required.')], { title: 'Add site' });
         await pause();
         return;
     }
+    const serverName = `${subdomain}.minddev.nl`;
 
     const fileName = (await ask(`  ${THEME.info}Config filename [${serverName}]:${C.reset} `)).trim() || serverName;
 
@@ -883,24 +897,20 @@ async function addSite() {
         root = (await ask(`  ${THEME.info}Document root (e.g. /var/www/${serverName}):${C.reset} `)).trim();
         if (!root) root = `/var/www/${serverName}`;
     } else if (siteType === '2') {
-        proxyPass = (await ask(`  ${THEME.info}Proxy pass (e.g. http://localhost:3000):${C.reset} `)).trim();
-        if (!proxyPass) {
-            await showDashboard([error('Proxy pass URL is required.')], { title: 'Add site' });
+        const proxyPort = (await ask(`  ${THEME.info}Proxy port (e.g. 3000):${C.reset} `)).trim();
+        if (!proxyPort) {
+            await showDashboard([error('Proxy port is required.')], { title: 'Add site' });
             await pause();
             return;
         }
+        proxyPass = `http://localhost:${proxyPort}`;
     }
 
     const useSSL = (await ask(`  ${THEME.info}Enable SSL? [y/N]:${C.reset} `)).trim().toLowerCase();
     if (useSSL === 'y') {
         listen = '443 ssl';
-        sslCert = (await ask(`  ${THEME.info}SSL certificate path:${C.reset} `)).trim();
-        sslKey = (await ask(`  ${THEME.info}SSL key path:${C.reset} `)).trim();
-        if (!sslCert || !sslKey) {
-            await showDashboard([error('SSL paths are required when SSL is enabled.')], { title: 'Add site' });
-            await pause();
-            return;
-        }
+        sslCert = `/etc/letsencrypt/live/${serverName}/fullchain.pem`;
+        sslKey = `/etc/letsencrypt/live/${serverName}/privkey.pem`;
     }
 
     const config = generateServerBlock({ serverName, listen, root, proxyPass, sslCert, sslKey });
@@ -924,27 +934,68 @@ async function addSite() {
             fs.mkdirSync(CONFIG.SITES_AVAILABLE, { recursive: true });
         }
         const filePath = path.join(CONFIG.SITES_AVAILABLE, fileName);
-        fs.writeFileSync(filePath, config, 'utf-8');
 
-        const autoEnable = (await ask(`  ${THEME.info}Enable site now? [Y/n]:${C.reset} `)).trim().toLowerCase();
-        if (autoEnable !== 'n') {
+        if (useSSL === 'y') {
+            const tmpConfig = generateServerBlock({ serverName, listen: '80', root, proxyPass, sslCert: '', sslKey: '' });
+            fs.writeFileSync(filePath, tmpConfig, 'utf-8');
             enableSite(fileName);
-        }
 
-        const testResult = await nginxTest();
-        if (testResult.valid) {
+            const testResult = await nginxTest();
+            if (testResult.valid) {
+                await nginxExec('-s reload');
+            }
+
             await showDashboard([
-                success(`Site "${fileName}" created!`),
-                '',
-                `${C.dim}Config:${C.reset} ${filePath}`,
-                `${C.dim}Test:${C.reset}   ${success('Configuration is valid')}`,
-            ], { title: 'Add site', borderColor: THEME.success });
+                info('Obtaining SSL certificate from Let\'s Encrypt...'),
+                `${C.dim}This may take a moment.${C.reset}`,
+            ], { title: 'Add site - SSL', titleColor: THEME.info });
+
+            try {
+                await runCertbot(serverName);
+                await nginxExec('-s reload');
+
+                const finalConfig = fs.readFileSync(filePath, 'utf-8');
+                const resultLines = [
+                    success(`Site "${fileName}" created with SSL!`),
+                    '',
+                    `${C.dim}Config:${C.reset} ${filePath}`,
+                ];
+                if (finalConfig.includes('ssl_certificate')) {
+                    resultLines.push(`${C.dim}SSL:${C.reset}     ${success('Certificate installed')}`);
+                }
+                await showDashboard(resultLines, { title: 'Add site', borderColor: THEME.success });
+            } catch (e) {
+                await showDashboard([
+                    success(`Site "${fileName}" created (without SSL).`),
+                    warn(`SSL certificate failed: ${e.message}`),
+                    '',
+                    `${C.dim}Run certbot manually later:${C.reset}`,
+                    `  ${C.cyan}sudo certbot --nginx -d ${serverName}${C.reset}`,
+                ], { title: 'Add site', borderColor: THEME.warning });
+            }
         } else {
-            await showDashboard([
-                success(`Site "${fileName}" created!`),
-                warn('Configuration test failed:'),
-                `  ${C.dim}${testResult.output}${C.reset}`,
-            ], { title: 'Add site', borderColor: THEME.warning });
+            fs.writeFileSync(filePath, config, 'utf-8');
+
+            const autoEnable = (await ask(`  ${THEME.info}Enable site now? [Y/n]:${C.reset} `)).trim().toLowerCase();
+            if (autoEnable !== 'n') {
+                enableSite(fileName);
+            }
+
+            const testResult = await nginxTest();
+            if (testResult.valid) {
+                await showDashboard([
+                    success(`Site "${fileName}" created!`),
+                    '',
+                    `${C.dim}Config:${C.reset} ${filePath}`,
+                    `${C.dim}Test:${C.reset}   ${success('Configuration is valid')}`,
+                ], { title: 'Add site', borderColor: THEME.success });
+            } else {
+                await showDashboard([
+                    success(`Site "${fileName}" created!`),
+                    warn('Configuration test failed:'),
+                    `  ${C.dim}${testResult.output}${C.reset}`,
+                ], { title: 'Add site', borderColor: THEME.warning });
+            }
         }
     } catch (e) {
         await showDashboard([error(`Error saving: ${e.message}`)], { title: 'Add site' });
