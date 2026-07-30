@@ -1,0 +1,25 @@
+{
+  "name": "mind-nginx",
+  "version": "1.0.0",
+  "description": "Terminal-based Nginx Configuration Manager",
+  "main": "nginx.js",
+  "bin": {
+    "mindnginx": "./nginx.js"
+  },
+  "scripts": {
+    "start": "node nginx.js"
+  },
+  "keywords": [
+    "nginx",
+    "cli",
+    "tui",
+    "server",
+    "configuration",
+    "management"
+  ],
+  "author": "MindDevelopment",
+  "license": "MIT",
+  "engines": {
+    "node": ">=10"
+  }
+}
